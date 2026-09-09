@@ -15,10 +15,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"os/signal"
 	"slices"
+	"sync"
 	"syscall"
 
 	"github.com/go-gst/go-glib/glib"
@@ -45,6 +47,7 @@ type PublisherParams struct {
 	URL            string
 	Token          string
 	PipelineString string
+	AllowedUsers   []string
 }
 
 type Publisher struct {
@@ -54,6 +57,11 @@ type Publisher struct {
 	videoTrack *publisherTrack
 	audioTrack *publisherTrack
 	room       *lksdk.Room
+
+	mu          sync.Mutex
+	stopOnce    sync.Once
+	latestUsers []string
+	stopStdin   chan struct{}
 }
 
 type elementTarget struct {
@@ -85,6 +93,14 @@ func (p *Publisher) Start() error {
 	)
 	if err != nil {
 		return err
+	}
+
+	p.applyAllowlist(p.params.AllowedUsers)
+
+	// read desired allowlist updates from stdin (full list per line; applied on SIGUSR1)
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+		p.stopStdin = make(chan struct{})
+		go p.readAllowlistStdin(p.stopStdin)
 	}
 
 	// publish tracks if sinks are set up
@@ -119,30 +135,83 @@ func (p *Publisher) Start() error {
 	}
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
 	go func() {
-		<-sigChan
-		p.Stop()
+		for sig := range sigChan {
+			if sig == syscall.SIGUSR1 {
+				p.mu.Lock()
+				users := p.latestUsers
+				p.mu.Unlock()
+				p.applyAllowlist(users)
+				continue
+			}
+			p.Stop()
+			return
+		}
 	}()
 
 	p.loop.Run()
 	return nil
 }
 
+func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
+	// unblock the scanner read on shutdown
+	go func() {
+		<-stop
+		_ = os.Stdin.Close()
+	}()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		users := parseAllowedUsers(scanner.Text())
+		if users == nil {
+			continue
+		}
+		p.mu.Lock()
+		p.latestUsers = users
+		p.mu.Unlock()
+	}
+}
+
+func (p *Publisher) applyAllowlist(users []string) {
+	if len(users) == 0 || p.room == nil {
+		return
+	}
+	trackPerms := make([]*livekit.TrackPermission, len(users))
+	for i, identity := range users {
+		trackPerms[i] = &livekit.TrackPermission{
+			ParticipantIdentity: identity,
+			AllTracks:           true,
+		}
+	}
+	p.room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
+		AllParticipants:  false,
+		TrackPermissions: trackPerms,
+	})
+	logger.Infow("subscription permission applied", "allowedIdentities", len(users))
+}
+
 func (p *Publisher) Stop() {
-	logger.Infow("stopping publisher..")
-	if p.pipeline != nil {
-		p.pipeline.BlockSetState(gst.StateNull)
-		p.pipeline = nil
-	}
-	if p.room != nil {
-		p.room.Disconnect()
-		p.room = nil
-	}
-	if p.loop != nil {
-		p.loop.Quit()
-		p.loop = nil
-	}
+	// Stop may be invoked concurrently from the signal handler goroutine and
+	// the GStreamer bus watch (EOS/error); run the teardown exactly once.
+	p.stopOnce.Do(func() {
+		logger.Infow("stopping publisher..")
+		if p.stopStdin != nil {
+			close(p.stopStdin)
+			p.stopStdin = nil
+		}
+		if p.pipeline != nil {
+			p.pipeline.BlockSetState(gst.StateNull)
+			p.pipeline = nil
+		}
+		if p.room != nil {
+			p.room.Disconnect()
+			p.room = nil
+		}
+		if p.loop != nil {
+			p.loop.Quit()
+			p.loop = nil
+		}
+	})
 }
 
 func (p *Publisher) messageWatch(msg *gst.Message) bool {
