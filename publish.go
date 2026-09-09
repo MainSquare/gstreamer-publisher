@@ -162,6 +162,9 @@ func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
 		users := parseAllowedUsers(scanner.Text())
+		if users == nil {
+			continue
+		}
 		p.mu.Lock()
 		p.latestUsers = users
 		p.mu.Unlock()

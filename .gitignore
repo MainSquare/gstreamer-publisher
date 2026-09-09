@@ -3,3 +3,6 @@ gstreamer-publisher
 
 # ICM specialist hub (workspace convention: gitignored)
 icm/
+
+# subagent artifacts
+.pi-subagents/
