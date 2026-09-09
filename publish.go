@@ -15,10 +15,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"os/signal"
 	"slices"
+	"sync"
 	"syscall"
 
 	"github.com/go-gst/go-glib/glib"
@@ -55,6 +57,10 @@ type Publisher struct {
 	videoTrack *publisherTrack
 	audioTrack *publisherTrack
 	room       *lksdk.Room
+
+	mu          sync.Mutex
+	latestUsers []string
+	stopStdin   chan struct{}
 }
 
 type elementTarget struct {
@@ -88,19 +94,12 @@ func (p *Publisher) Start() error {
 		return err
 	}
 
-	if len(p.params.AllowedUsers) > 0 {
-		trackPerms := make([]*livekit.TrackPermission, len(p.params.AllowedUsers))
-		for i, identity := range p.params.AllowedUsers {
-			trackPerms[i] = &livekit.TrackPermission{
-				ParticipantIdentity: identity,
-				AllTracks:           true,
-			}
-		}
-		p.room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
-			AllParticipants:  false,
-			TrackPermissions: trackPerms,
-		})
-		logger.Infow("subscription permission applied", "allowedIdentities", len(p.params.AllowedUsers))
+	p.applyAllowlist(p.params.AllowedUsers)
+
+	// read desired allowlist updates from stdin (full list per line; applied on SIGUSR1)
+	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+		p.stopStdin = make(chan struct{})
+		go p.readAllowlistStdin(p.stopStdin)
 	}
 
 	// publish tracks if sinks are set up
@@ -135,18 +134,64 @@ func (p *Publisher) Start() error {
 	}
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
 	go func() {
-		<-sigChan
-		p.Stop()
+		for sig := range sigChan {
+			if sig == syscall.SIGUSR1 {
+				p.mu.Lock()
+				users := p.latestUsers
+				p.mu.Unlock()
+				p.applyAllowlist(users)
+				continue
+			}
+			p.Stop()
+			return
+		}
 	}()
 
 	p.loop.Run()
 	return nil
 }
 
+func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
+	// unblock the scanner read on shutdown
+	go func() {
+		<-stop
+		_ = os.Stdin.Close()
+	}()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		users := parseAllowedUsers(scanner.Text())
+		p.mu.Lock()
+		p.latestUsers = users
+		p.mu.Unlock()
+	}
+}
+
+func (p *Publisher) applyAllowlist(users []string) {
+	if len(users) == 0 || p.room == nil {
+		return
+	}
+	trackPerms := make([]*livekit.TrackPermission, len(users))
+	for i, identity := range users {
+		trackPerms[i] = &livekit.TrackPermission{
+			ParticipantIdentity: identity,
+			AllTracks:           true,
+		}
+	}
+	p.room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
+		AllParticipants:  false,
+		TrackPermissions: trackPerms,
+	})
+	logger.Infow("subscription permission applied", "allowedIdentities", len(users))
+}
+
 func (p *Publisher) Stop() {
 	logger.Infow("stopping publisher..")
+	if p.stopStdin != nil {
+		close(p.stopStdin)
+		p.stopStdin = nil
+	}
 	if p.pipeline != nil {
 		p.pipeline.BlockSetState(gst.StateNull)
 		p.pipeline = nil
