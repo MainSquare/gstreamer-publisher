@@ -59,6 +59,7 @@ type Publisher struct {
 	room       *lksdk.Room
 
 	mu          sync.Mutex
+	stopOnce    sync.Once
 	latestUsers []string
 	stopStdin   chan struct{}
 }
@@ -190,23 +191,27 @@ func (p *Publisher) applyAllowlist(users []string) {
 }
 
 func (p *Publisher) Stop() {
-	logger.Infow("stopping publisher..")
-	if p.stopStdin != nil {
-		close(p.stopStdin)
-		p.stopStdin = nil
-	}
-	if p.pipeline != nil {
-		p.pipeline.BlockSetState(gst.StateNull)
-		p.pipeline = nil
-	}
-	if p.room != nil {
-		p.room.Disconnect()
-		p.room = nil
-	}
-	if p.loop != nil {
-		p.loop.Quit()
-		p.loop = nil
-	}
+	// Stop may be invoked concurrently from the signal handler goroutine and
+	// the GStreamer bus watch (EOS/error); run the teardown exactly once.
+	p.stopOnce.Do(func() {
+		logger.Infow("stopping publisher..")
+		if p.stopStdin != nil {
+			close(p.stopStdin)
+			p.stopStdin = nil
+		}
+		if p.pipeline != nil {
+			p.pipeline.BlockSetState(gst.StateNull)
+			p.pipeline = nil
+		}
+		if p.room != nil {
+			p.room.Disconnect()
+			p.room = nil
+		}
+		if p.loop != nil {
+			p.loop.Quit()
+			p.loop = nil
+		}
+	})
 }
 
 func (p *Publisher) messageWatch(msg *gst.Message) bool {
