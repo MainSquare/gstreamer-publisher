@@ -1,0 +1,37 @@
+{
+  "runId": "b5665689",
+  "agent": "dev-agent",
+  "task": "Implement an approved bug fix in the gstreamer-publisher repository at /mnt/work/teleo/gstreamer-publisher (your scope: its local icm/ hub and this repo's code).\n\n**Change:** Make `Publisher.Stop()` in `publish.go` safe against concurrent invocation. `Stop()` is currently called from two goroutines: the signal goroutine (SIGINT/SIGTERM/SIGQUIT in `Start()`) and the GStreamer bus-watch callback (`messageWatch` on EOS/error). Concurrent calls race on the check-then-act nil guards for `p.stopStdin` (double `close` panics) and on `p.pipeline`/`p.room`/`p.loop` (nil deref risk).\n\n**Approved fix (owner-selected):** wrap the entire `Stop()` teardown body in a `sync.Once`. Keep the laziest working diff:\n- Add `stopOnce sync.Once` to the `Publisher` struct (next to the existing `mu sync.Mutex`).\n- Move the whole body of `Stop()` into a closure executed via `p.stopOnce.Do(...)`. The log line `logger.Infow(\"stopping publisher..\")` may stay inside the Once body.\n- No other refactors, no extra mutexes, no behavior changes.\n\n**Process requirements (per repo icm/AGENTS.md):**\n1. Create a change folder `icm/03_changes/active/2026-<mm>-<dd>--stop-sync-once/` (use today's date) with a minimal intake/README noting the concurrent-shutdown panic and the approved sync.Once fix.\n2. Do the change in a Worktrunk worktree per the dev-agent policy, atomic commit, message format `<type>(<change-id>): <subject>` with trailer `Change-Id: <change-folder-slug>`.\n3. Validation: run `gofmt` and `go vet ./...` / `go build ./...` if CGO/GStreamer headers are available; otherwise record best-effort static checks and note explicitly that CGO build was unavailable. Save validation evidence in the change folder (04_validation runbook conventions).\n4. Report back: files changed, commit hash + Change-Id, validation results, and whether the change is on a worktree branch or merged to main.",
+  "exitCode": 0,
+  "usage": {
+    "input": 17973,
+    "output": 5516,
+    "cacheRead": 141120,
+    "cacheWrite": 0,
+    "cost": 0.004843775,
+    "turns": 16
+  },
+  "model": "openrouter/z-ai/glm-5.3-flash:high",
+  "attemptedModels": [
+    "openrouter/z-ai/glm-5.3-flash:high"
+  ],
+  "modelAttempts": [
+    {
+      "model": "openrouter/z-ai/glm-5.3-flash:high",
+      "success": true,
+      "exitCode": 0,
+      "usage": {
+        "input": 17973,
+        "output": 5516,
+        "cacheRead": 141120,
+        "cacheWrite": 0,
+        "cost": 0.004843775,
+        "turns": 16
+      }
+    }
+  ],
+  "durationMs": 169892,
+  "toolCount": 19,
+  "transcriptPath": "/mnt/work/teleo/gstreamer-publisher/.pi-subagents/artifacts/b5665689_dev-agent_0_transcript.jsonl",
+  "timestamp": 1788988423753
+}
