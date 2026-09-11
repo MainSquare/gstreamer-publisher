@@ -11,7 +11,7 @@ It parses a gst-launch style pipeline and reads negotiates
 ## Install
 
 ```bash
-go install github.com/livekit/gstreamer-publisher@latest
+go install github.com/MainSquare/gstreamer-publisher@latest
 ```
 
 ## Usage
