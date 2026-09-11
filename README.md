@@ -33,6 +33,9 @@ to the published tracks:
   is applied when the process receives `SIGUSR1`.
 - An empty (or otherwise identity-free) line is an explicit deny-all: no participant may subscribe, and participants
   that are currently subscribed are revoked.
+- The special line `all` (also accepted as `--allowed-users all`) broadcasts to every participant in the room.
+  The identity `all` is therefore reserved and cannot be allow-listed as a regular participant; the identities
+  used by the browser-sandbox (`sandbox-…`, `room-gst-producer`) never collide with it.
 
 Without `--allowed-users` the publisher does not read stdin at all and every participant in the room can subscribe.
 

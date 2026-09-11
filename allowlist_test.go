@@ -64,6 +64,16 @@ func TestSubscriptionPermission(t *testing.T) {
 		}
 	})
 
+	t.Run("all keyword broadcasts to everyone", func(t *testing.T) {
+		perm := subscriptionPermission([]string{allowAllKeyword})
+		if !perm.AllParticipants {
+			t.Fatal("AllParticipants should be true")
+		}
+		if len(perm.TrackPermissions) != 0 {
+			t.Fatalf("TrackPermissions should be empty, got %v", perm.TrackPermissions)
+		}
+	})
+
 	t.Run("identities become all-tracks permissions", func(t *testing.T) {
 		perm := subscriptionPermission([]string{"alice", "bob"})
 		if perm.AllParticipants {

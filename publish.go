@@ -32,6 +32,11 @@ import (
 )
 
 var (
+	// allowAllKeyword is the reserved stdin/--allowed-users keyword that
+	// switches the publisher to broadcast mode (every participant may
+	// subscribe); it cannot be used as a participant identity.
+	allowAllKeyword = "all"
+
 	supportedAudioMimeTypes = []string{
 		"audio/x-opus",
 	}
@@ -210,6 +215,12 @@ func (p *Publisher) applyAllowlist(users []string) {
 
 func subscriptionPermission(users []string) *livekit.SubscriptionPermission {
 	perm := &livekit.SubscriptionPermission{}
+	// "all" is a reserved keyword (see README "Subscription allowlist") and
+	// broadcasts to every participant in the room.
+	if len(users) == 1 && users[0] == allowAllKeyword {
+		perm.AllParticipants = true
+		return perm
+	}
 	if len(users) > 0 {
 		trackPerms := make([]*livekit.TrackPermission, len(users))
 		for i, identity := range users {
