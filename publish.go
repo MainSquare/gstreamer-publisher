@@ -58,6 +58,9 @@ type Publisher struct {
 	audioTrack *publisherTrack
 	room       *lksdk.Room
 
+	// mu guards the lifecycle state (p.room, latestUsers, stopStdin):
+	// allowlist updates from the SIGUSR1 goroutine must not interleave with
+	// Stop tearing the room down. It is never held across SDK calls.
 	mu          sync.Mutex
 	stopOnce    sync.Once
 	latestUsers []string
@@ -87,8 +90,11 @@ func (p *Publisher) Start() error {
 	cb.OnDisconnected = func() {
 		// TODO: stop publishing and exit
 	}
-	p.room = lksdk.NewRoom(cb)
-	err := p.room.JoinWithToken(p.params.URL, p.params.Token,
+	room := lksdk.NewRoom(cb)
+	p.mu.Lock()
+	p.room = room
+	p.mu.Unlock()
+	err := room.JoinWithToken(p.params.URL, p.params.Token,
 		lksdk.WithAutoSubscribe(false),
 	)
 	if err != nil {
@@ -105,7 +111,7 @@ func (p *Publisher) Start() error {
 
 	// publish tracks if sinks are set up
 	if p.videoTrack != nil {
-		pub, err := p.room.LocalParticipant.PublishTrack(p.videoTrack.track, &lksdk.TrackPublicationOptions{
+		pub, err := room.LocalParticipant.PublishTrack(p.videoTrack.track, &lksdk.TrackPublicationOptions{
 			Source: livekit.TrackSource_CAMERA,
 		})
 		if err != nil {
@@ -113,12 +119,12 @@ func (p *Publisher) Start() error {
 		}
 		p.videoTrack.publication = pub
 		p.videoTrack.onEOS = func() {
-			_ = p.room.LocalParticipant.UnpublishTrack(pub.SID())
+			_ = room.LocalParticipant.UnpublishTrack(pub.SID())
 		}
 	}
 
 	if p.audioTrack != nil {
-		pub, err := p.room.LocalParticipant.PublishTrack(p.audioTrack.track, &lksdk.TrackPublicationOptions{
+		pub, err := room.LocalParticipant.PublishTrack(p.audioTrack.track, &lksdk.TrackPublicationOptions{
 			Source: livekit.TrackSource_MICROPHONE,
 		})
 		if err != nil {
@@ -126,7 +132,7 @@ func (p *Publisher) Start() error {
 		}
 		p.audioTrack.publication = pub
 		p.audioTrack.onEOS = func() {
-			_ = p.room.LocalParticipant.UnpublishTrack(pub.SID())
+			_ = room.LocalParticipant.UnpublishTrack(pub.SID())
 		}
 	}
 
@@ -173,7 +179,14 @@ func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
 }
 
 func (p *Publisher) applyAllowlist(users []string) {
-	if len(users) == 0 || p.room == nil {
+	// Capture the room reference under the lifecycle mutex without holding it
+	// across the SDK call: Stop may concurrently clear p.room, and the SDK call
+	// must not run while holding p.mu (the SIGUSR1/bus-watch goroutines also
+	// need the mutex).
+	p.mu.Lock()
+	room := p.room
+	p.mu.Unlock()
+	if room == nil {
 		return
 	}
 	trackPerms := make([]*livekit.TrackPermission, len(users))
@@ -183,7 +196,7 @@ func (p *Publisher) applyAllowlist(users []string) {
 			AllTracks:           true,
 		}
 	}
-	p.room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
+	room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
 		AllParticipants:  false,
 		TrackPermissions: trackPerms,
 	})
@@ -203,9 +216,12 @@ func (p *Publisher) Stop() {
 			p.pipeline.BlockSetState(gst.StateNull)
 			p.pipeline = nil
 		}
-		if p.room != nil {
-			p.room.Disconnect()
-			p.room = nil
+		p.mu.Lock()
+		room := p.room
+		p.room = nil
+		p.mu.Unlock()
+		if room != nil {
+			room.Disconnect()
 		}
 		if p.loop != nil {
 			p.loop.Quit()
