@@ -23,6 +23,19 @@ When constructing pipelines, you would want to end the pipeline with elements th
 Do not mux the streams into a container format. GStreamer-publisher will inspect the pipeline and import the raw
 streams into LiveKit.
 
+### Subscription allowlist
+
+Pass `--allowed-users` with a comma-separated list of LiveKit participant identities to restrict who can subscribe
+to the published tracks:
+
+- On startup only the listed identities are allowed to subscribe; everyone else is denied.
+- While the publisher runs, it reads updated allowlists from stdin: each line is a full, comma-separated list and
+  is applied when the process receives `SIGUSR1`.
+- An empty (or otherwise identity-free) line is an explicit deny-all: no participant may subscribe, and participants
+  that are currently subscribed are revoked.
+
+Without `--allowed-users` the publisher does not read stdin at all and every participant in the room can subscribe.
+
 ## Examples
 
 The examples below assume you have the following environment variables defined:

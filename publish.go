@@ -101,12 +101,22 @@ func (p *Publisher) Start() error {
 		return err
 	}
 
-	p.applyAllowlist(p.params.AllowedUsers)
+	// Without --allowed-users the publisher stays in default broadcast mode
+	// and does not read stdin at all (see README "Subscription allowlist").
+	if len(p.params.AllowedUsers) > 0 {
+		// track the active allowlist so SIGUSR1 re-applies the latest state
+		p.mu.Lock()
+		p.latestUsers = p.params.AllowedUsers
+		p.mu.Unlock()
+		p.applyAllowlist(p.params.AllowedUsers)
 
-	// read desired allowlist updates from stdin (full list per line; applied on SIGUSR1)
-	if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
-		p.stopStdin = make(chan struct{})
-		go p.readAllowlistStdin(p.stopStdin)
+		// read desired allowlist updates from stdin (full list per line;
+		// applied on SIGUSR1). An empty (or identity-free) line is an explicit
+		// deny-all — see README.
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+			p.stopStdin = make(chan struct{})
+			go p.readAllowlistStdin(p.stopStdin)
+		}
 	}
 
 	// publish tracks if sinks are set up
@@ -145,10 +155,12 @@ func (p *Publisher) Start() error {
 	go func() {
 		for sig := range sigChan {
 			if sig == syscall.SIGUSR1 {
-				p.mu.Lock()
-				users := p.latestUsers
-				p.mu.Unlock()
-				p.applyAllowlist(users)
+				if len(p.params.AllowedUsers) > 0 {
+					p.mu.Lock()
+					users := p.latestUsers
+					p.mu.Unlock()
+					p.applyAllowlist(users)
+				}
 				continue
 			}
 			p.Stop()
@@ -168,10 +180,9 @@ func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
 	}()
 	scanner := bufio.NewScanner(os.Stdin)
 	for scanner.Scan() {
+		// parseAllowedUsers returns nil for empty/whitespace-only lines, which
+		// applyAllowlist sends as an explicit deny-all.
 		users := parseAllowedUsers(scanner.Text())
-		if users == nil {
-			continue
-		}
 		p.mu.Lock()
 		p.latestUsers = users
 		p.mu.Unlock()
@@ -189,18 +200,27 @@ func (p *Publisher) applyAllowlist(users []string) {
 	if room == nil {
 		return
 	}
-	trackPerms := make([]*livekit.TrackPermission, len(users))
-	for i, identity := range users {
-		trackPerms[i] = &livekit.TrackPermission{
-			ParticipantIdentity: identity,
-			AllTracks:           true,
-		}
-	}
-	room.LocalParticipant.SetSubscriptionPermission(&livekit.SubscriptionPermission{
-		AllParticipants:  false,
-		TrackPermissions: trackPerms,
-	})
+	// An empty permission (AllParticipants=false, no TrackPermissions) is an
+	// explicit deny-all on the LiveKit server and revokes peers that are
+	// currently subscribed (livekit-server uptrackmanager.go,
+	// parseSubscriptionPermissionsLocked + maybeRevokeSubscriptions).
+	room.LocalParticipant.SetSubscriptionPermission(subscriptionPermission(users))
 	logger.Infow("subscription permission applied", "allowedIdentities", len(users))
+}
+
+func subscriptionPermission(users []string) *livekit.SubscriptionPermission {
+	perm := &livekit.SubscriptionPermission{}
+	if len(users) > 0 {
+		trackPerms := make([]*livekit.TrackPermission, len(users))
+		for i, identity := range users {
+			trackPerms[i] = &livekit.TrackPermission{
+				ParticipantIdentity: identity,
+				AllTracks:           true,
+			}
+		}
+		perm.TrackPermissions = trackPerms
+	}
+	return perm
 }
 
 func (p *Publisher) Stop() {
