@@ -115,9 +115,10 @@ func (p *Publisher) Start() error {
 		p.mu.Unlock()
 		p.applyAllowlist(p.params.AllowedUsers)
 
-		// read desired allowlist updates from stdin (full list per line;
-		// applied on SIGUSR1). An empty (or identity-free) line is an explicit
-		// deny-all — see README.
+		// read allowlist updates from stdin (full list per line; each line is
+		// applied as soon as it is read — SIGUSR1 only re-applies the latest
+		// state). An empty (or identity-free) line is an explicit deny-all —
+		// see README.
 		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
 			p.stopStdin = make(chan struct{})
 			go p.readAllowlistStdin(p.stopStdin)
@@ -191,6 +192,11 @@ func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
 		p.mu.Lock()
 		p.latestUsers = users
 		p.mu.Unlock()
+		// Apply immediately rather than waiting for SIGUSR1: this removes the
+		// race where the signal handler re-applied the previous latestUsers
+		// before this line was read (silently ignoring the update until the
+		// next signal), and makes update ordering with SIGUSR1 irrelevant.
+		p.applyAllowlist(users)
 	}
 }
 
