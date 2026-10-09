@@ -11,7 +11,7 @@ It parses a gst-launch style pipeline and reads negotiates
 ## Install
 
 ```bash
-go install github.com/livekit/gstreamer-publisher@latest
+go install github.com/MainSquare/gstreamer-publisher@latest
 ```
 
 ## Usage
@@ -22,6 +22,25 @@ the `canPublish` permission.
 When constructing pipelines, you would want to end the pipeline with elements that produce H264, VP8, VP9, or Opus.
 Do not mux the streams into a container format. GStreamer-publisher will inspect the pipeline and import the raw
 streams into LiveKit.
+
+### Subscription allowlist
+
+Pass `--allowed-users` with a comma-separated list of LiveKit participant identities to restrict who can subscribe
+to the published tracks:
+
+- On startup only the listed identities are allowed to subscribe; everyone else is denied.
+- While the publisher runs, it reads updated allowlists from stdin: each line is a full, comma-separated list and
+  is applied as soon as it is read. `SIGUSR1` re-applies the currently active allowlist (e.g. after a reconnect).
+- The stdin allowlist reader only runs when stdin is a pipe or file, not an interactive terminal. In production
+  stdin is a pipe from the room server, so lines typed at an interactive terminal are not consumed.
+- An empty (or otherwise identity-free) line is an explicit deny-all: no participant may subscribe, and participants
+  that are currently subscribed are revoked.
+- The special line `all` (also accepted as `--allowed-users all`) broadcasts to every participant in the room.
+  The identity `all` is therefore reserved and cannot be allow-listed as a regular participant.
+- Identities are opaque participant identifiers (e.g. UUIDs) supplied by the consumer. This binary defines no
+  identity namespaces of its own and accepts whatever strings the caller passes.
+
+Without `--allowed-users` the publisher does not read stdin at all and every participant in the room can subscribe.
 
 ## Examples
 

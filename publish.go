@@ -15,10 +15,12 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"os"
 	"os/signal"
 	"slices"
+	"sync"
 	"syscall"
 
 	"github.com/go-gst/go-glib/glib"
@@ -30,6 +32,11 @@ import (
 )
 
 var (
+	// allowAllKeyword is the reserved stdin/--allowed-users keyword that
+	// switches the publisher to broadcast mode (every participant may
+	// subscribe); it cannot be used as a participant identity.
+	allowAllKeyword = "all"
+
 	supportedAudioMimeTypes = []string{
 		"audio/x-opus",
 	}
@@ -45,6 +52,7 @@ type PublisherParams struct {
 	URL            string
 	Token          string
 	PipelineString string
+	AllowedUsers   []string
 }
 
 type Publisher struct {
@@ -54,6 +62,14 @@ type Publisher struct {
 	videoTrack *publisherTrack
 	audioTrack *publisherTrack
 	room       *lksdk.Room
+
+	// mu guards the lifecycle state (p.room, latestUsers, stopStdin):
+	// allowlist updates from the SIGUSR1 goroutine must not interleave with
+	// Stop tearing the room down. It is never held across SDK calls.
+	mu          sync.Mutex
+	stopOnce    sync.Once
+	latestUsers []string
+	stopStdin   chan struct{}
 }
 
 type elementTarget struct {
@@ -79,17 +95,39 @@ func (p *Publisher) Start() error {
 	cb.OnDisconnected = func() {
 		// TODO: stop publishing and exit
 	}
-	p.room = lksdk.NewRoom(cb)
-	err := p.room.JoinWithToken(p.params.URL, p.params.Token,
+	room := lksdk.NewRoom(cb)
+	p.mu.Lock()
+	p.room = room
+	p.mu.Unlock()
+	err := room.JoinWithToken(p.params.URL, p.params.Token,
 		lksdk.WithAutoSubscribe(false),
 	)
 	if err != nil {
 		return err
 	}
 
+	// Without --allowed-users the publisher stays in default broadcast mode
+	// and does not read stdin at all (see README "Subscription allowlist").
+	if len(p.params.AllowedUsers) > 0 {
+		// track the active allowlist so SIGUSR1 re-applies the latest state
+		p.mu.Lock()
+		p.latestUsers = p.params.AllowedUsers
+		p.mu.Unlock()
+		p.applyAllowlist(p.params.AllowedUsers)
+
+		// read allowlist updates from stdin (full list per line; each line is
+		// applied as soon as it is read — SIGUSR1 only re-applies the latest
+		// state). An empty (or identity-free) line is an explicit deny-all —
+		// see README.
+		if fi, err := os.Stdin.Stat(); err == nil && fi.Mode()&os.ModeCharDevice == 0 {
+			p.stopStdin = make(chan struct{})
+			go p.readAllowlistStdin(p.stopStdin)
+		}
+	}
+
 	// publish tracks if sinks are set up
 	if p.videoTrack != nil {
-		pub, err := p.room.LocalParticipant.PublishTrack(p.videoTrack.track, &lksdk.TrackPublicationOptions{
+		pub, err := room.LocalParticipant.PublishTrack(p.videoTrack.track, &lksdk.TrackPublicationOptions{
 			Source: livekit.TrackSource_CAMERA,
 		})
 		if err != nil {
@@ -97,12 +135,12 @@ func (p *Publisher) Start() error {
 		}
 		p.videoTrack.publication = pub
 		p.videoTrack.onEOS = func() {
-			_ = p.room.LocalParticipant.UnpublishTrack(pub.SID())
+			_ = room.LocalParticipant.UnpublishTrack(pub.SID())
 		}
 	}
 
 	if p.audioTrack != nil {
-		pub, err := p.room.LocalParticipant.PublishTrack(p.audioTrack.track, &lksdk.TrackPublicationOptions{
+		pub, err := room.LocalParticipant.PublishTrack(p.audioTrack.track, &lksdk.TrackPublicationOptions{
 			Source: livekit.TrackSource_MICROPHONE,
 		})
 		if err != nil {
@@ -110,7 +148,7 @@ func (p *Publisher) Start() error {
 		}
 		p.audioTrack.publication = pub
 		p.audioTrack.onEOS = func() {
-			_ = p.room.LocalParticipant.UnpublishTrack(pub.SID())
+			_ = room.LocalParticipant.UnpublishTrack(pub.SID())
 		}
 	}
 
@@ -119,30 +157,114 @@ func (p *Publisher) Start() error {
 	}
 
 	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT, syscall.SIGUSR1)
 	go func() {
-		<-sigChan
-		p.Stop()
+		for sig := range sigChan {
+			if sig == syscall.SIGUSR1 {
+				if len(p.params.AllowedUsers) > 0 {
+					p.mu.Lock()
+					users := p.latestUsers
+					p.mu.Unlock()
+					p.applyAllowlist(users)
+				}
+				continue
+			}
+			p.Stop()
+			return
+		}
 	}()
 
 	p.loop.Run()
 	return nil
 }
 
+func (p *Publisher) readAllowlistStdin(stop <-chan struct{}) {
+	// unblock the scanner read on shutdown
+	go func() {
+		<-stop
+		_ = os.Stdin.Close()
+	}()
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		// parseAllowedUsers returns nil for empty/whitespace-only lines, which
+		// applyAllowlist sends as an explicit deny-all.
+		users := parseAllowedUsers(scanner.Text())
+		p.mu.Lock()
+		p.latestUsers = users
+		p.mu.Unlock()
+		// Apply immediately rather than waiting for SIGUSR1: this removes the
+		// race where the signal handler re-applied the previous latestUsers
+		// before this line was read (silently ignoring the update until the
+		// next signal), and makes update ordering with SIGUSR1 irrelevant.
+		p.applyAllowlist(users)
+	}
+}
+
+func (p *Publisher) applyAllowlist(users []string) {
+	// Capture the room reference under the lifecycle mutex without holding it
+	// across the SDK call: Stop may concurrently clear p.room, and the SDK call
+	// must not run while holding p.mu (the SIGUSR1/bus-watch goroutines also
+	// need the mutex).
+	p.mu.Lock()
+	room := p.room
+	p.mu.Unlock()
+	if room == nil {
+		return
+	}
+	// An empty permission (AllParticipants=false, no TrackPermissions) is an
+	// explicit deny-all on the LiveKit server and revokes peers that are
+	// currently subscribed (livekit-server uptrackmanager.go,
+	// parseSubscriptionPermissionsLocked + maybeRevokeSubscriptions).
+	room.LocalParticipant.SetSubscriptionPermission(subscriptionPermission(users))
+	logger.Infow("subscription permission applied", "allowedIdentities", len(users))
+}
+
+func subscriptionPermission(users []string) *livekit.SubscriptionPermission {
+	perm := &livekit.SubscriptionPermission{}
+	// "all" is a reserved keyword (see README "Subscription allowlist") and
+	// broadcasts to every participant in the room.
+	if len(users) == 1 && users[0] == allowAllKeyword {
+		perm.AllParticipants = true
+		return perm
+	}
+	if len(users) > 0 {
+		trackPerms := make([]*livekit.TrackPermission, len(users))
+		for i, identity := range users {
+			trackPerms[i] = &livekit.TrackPermission{
+				ParticipantIdentity: identity,
+				AllTracks:           true,
+			}
+		}
+		perm.TrackPermissions = trackPerms
+	}
+	return perm
+}
+
 func (p *Publisher) Stop() {
-	logger.Infow("stopping publisher..")
-	if p.pipeline != nil {
-		p.pipeline.BlockSetState(gst.StateNull)
-		p.pipeline = nil
-	}
-	if p.room != nil {
-		p.room.Disconnect()
+	// Stop may be invoked concurrently from the signal handler goroutine and
+	// the GStreamer bus watch (EOS/error); run the teardown exactly once.
+	p.stopOnce.Do(func() {
+		logger.Infow("stopping publisher..")
+		if p.stopStdin != nil {
+			close(p.stopStdin)
+			p.stopStdin = nil
+		}
+		if p.pipeline != nil {
+			p.pipeline.BlockSetState(gst.StateNull)
+			p.pipeline = nil
+		}
+		p.mu.Lock()
+		room := p.room
 		p.room = nil
-	}
-	if p.loop != nil {
-		p.loop.Quit()
-		p.loop = nil
-	}
+		p.mu.Unlock()
+		if room != nil {
+			room.Disconnect()
+		}
+		if p.loop != nil {
+			p.loop.Quit()
+			p.loop = nil
+		}
+	})
 }
 
 func (p *Publisher) messageWatch(msg *gst.Message) bool {
