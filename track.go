@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -41,9 +42,40 @@ type publisherTrack struct {
 	isEnded               atomic.Bool
 	onEOS                 func()
 	lastKeyframeRequestNs atomic.Int64
+	clock                 *captureClock
+	// only touched from the appsink's streaming thread
+	lastSampleTime time.Time
 }
 
-func createPublisherTrack(mimeType string) (*publisherTrack, error) {
+// captureClock places GStreamer running times on the wall clock. The audio
+// and video tracks share one, so both stay on the same timeline.
+type captureClock struct {
+	once   sync.Once
+	anchor time.Time
+}
+
+func (c *captureClock) wallTime(running time.Duration) time.Time {
+	c.once.Do(func() {
+		c.anchor = time.Now().Add(-running)
+	})
+	return c.anchor.Add(running)
+}
+
+// nextSampleTime returns the capture time to publish a sample with, or the
+// zero time when the sample has to fall back to its duration: it has no
+// timestamp, or it doesn't move forward (the SDK rejects those).
+func nextSampleTime(clock *captureClock, last time.Time, running time.Duration, valid bool) time.Time {
+	if clock == nil || !valid {
+		return time.Time{}
+	}
+	ts := clock.wallTime(running)
+	if !last.IsZero() && !ts.After(last) {
+		return time.Time{}
+	}
+	return ts
+}
+
+func createPublisherTrack(mimeType string, clock *captureClock, sync bool) (*publisherTrack, error) {
 	webrtcMime := ""
 	if mimeType == "audio/x-opus" {
 		webrtcMime = webrtc.MimeTypeOpus
@@ -64,9 +96,18 @@ func createPublisherTrack(mimeType string) (*publisherTrack, error) {
 		return nil, err
 	}
 
+	if !sync {
+		// With sync on, the sink holds each sample until its timestamp plus the
+		// pipeline latency, which is the slowest branch's (audio: about 50 ms).
+		if err := sink.Element.SetProperty("sync", false); err != nil {
+			return nil, err
+		}
+	}
+
 	pt := &publisherTrack{
 		mimeType: webrtcMime,
 		sink:     sink,
+		clock:    clock,
 	}
 	sink.SetCallbacks(&app.SinkCallbacks{
 		EOSFunc:       pt.handleEOS,
@@ -117,12 +158,23 @@ func (t *publisherTrack) handleSample(sink *app.Sink) gst.FlowReturn {
 	}
 
 	duration := buffer.Duration()
-	// pts := buffer.PresentationTimestamp()
-	// ts := time.Duration(segment.ToRunningTime(gst.FormatTime, uint64(pts)))
+
+	// Publish with the capture time, so RTP timestamps follow real time. With
+	// only a duration they advance one frame per sample, and every frame the
+	// pipeline drops (a leaky queue, a busy encoder) leaves them further behind
+	// the clock, which receivers answer with a longer jitter buffer.
+	pts := buffer.PresentationTimestamp()
+	running := gst.ClockTimeNone
+	if pts != gst.ClockTimeNone {
+		running = gst.ClockTime(segment.ToRunningTime(gst.FormatTime, uint64(pts)))
+	}
+	sampleTime := nextSampleTime(t.clock, t.lastSampleTime, time.Duration(running), running != gst.ClockTimeNone)
+	t.lastSampleTime = sampleTime
 
 	err := t.track.WriteSample(media.Sample{
-		Data:     buffer.Bytes(),
-		Duration: time.Duration(duration),
+		Data:      buffer.Bytes(),
+		Duration:  time.Duration(duration),
+		Timestamp: sampleTime,
 	}, nil)
 
 	switch {

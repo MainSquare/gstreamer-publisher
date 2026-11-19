@@ -42,6 +42,18 @@ to the published tracks:
 
 Without `--allowed-users` the publisher does not read stdin at all and every participant in the room can subscribe.
 
+### Latency and timestamps
+
+Samples are published with their capture time (the buffer's running time), so RTP timestamps follow real time even
+when the pipeline drops frames, for example in a leaky queue or a busy encoder. Published by duration alone, every
+dropped frame would leave the timestamps further behind the clock, and receivers answer that with a longer jitter
+buffer.
+
+By default each sample is held until its timestamp plus the pipeline latency, which is the latency of the slowest
+branch. With an Opus branch next to the video that is about 50 ms, and video frames wait out most of it. Pass
+`--no-sync` to publish each sample as soon as it is encoded. Video then leaves a little ahead of the audio captured
+at the same moment (the difference between the two branches' encode times, around 10 to 30 ms).
+
 ## Examples
 
 The examples below assume you have the following environment variables defined:
