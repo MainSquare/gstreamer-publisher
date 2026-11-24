@@ -316,14 +316,13 @@ func (p *Publisher) initialize() error {
 		return errors.New("no supported elements found. pipeline needs to include encoded audio or video")
 	}
 
-	clock := &captureClock{}
 	for _, target := range targets {
 		if p.videoTrack != nil && !target.isAudio {
 			return errors.New("pipeline has more than one video source")
 		} else if p.audioTrack != nil && target.isAudio {
 			return errors.New("pipeline has more than one audio source")
 		}
-		pt, err := createPublisherTrack(target.mimeType, clock, !p.params.NoSync)
+		pt, err := createPublisherTrack(target.mimeType, !p.params.NoSync)
 		if err != nil {
 			return err
 		}

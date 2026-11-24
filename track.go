@@ -18,7 +18,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -42,40 +41,75 @@ type publisherTrack struct {
 	isEnded               atomic.Bool
 	onEOS                 func()
 	lastKeyframeRequestNs atomic.Int64
-	clock                 *captureClock
+	clockRate             uint32
 	// only touched from the appsink's streaming thread
-	lastSampleTime time.Time
+	rtp rtpClock
 }
 
-// captureClock places GStreamer running times on the wall clock. The audio
-// and video tracks share one, so both stay on the same timeline.
-type captureClock struct {
-	once   sync.Once
-	anchor time.Time
+// rtpClock turns each sample's capture time (its GStreamer running time) into
+// the RTP timestamp it is published with, so RTP timestamps follow real time.
+// A sample without a usable capture time goes one duration on from the last.
+type rtpClock struct {
+	started bool
+	last    uint32
 }
 
-func (c *captureClock) wallTime(running time.Duration) time.Time {
-	c.once.Do(func() {
-		c.anchor = time.Now().Add(-running)
-	})
-	return c.anchor.Add(running)
-}
+// rtpTimestampBase keeps the first timestamps away from zero, which the SDK
+// reads as "no timestamp given".
+const rtpTimestampBase = 1 << 16
 
-// nextSampleTime returns the capture time to publish a sample with, or the
-// zero time when the sample has to fall back to its duration: it has no
-// timestamp, or it doesn't move forward (the SDK rejects those).
-func nextSampleTime(clock *captureClock, last time.Time, running time.Duration, valid bool) time.Time {
-	if clock == nil || !valid {
-		return time.Time{}
+func rtpTicks(d time.Duration, clockRate uint32) uint32 {
+	if d <= 0 {
+		return 0
 	}
-	ts := clock.wallTime(running)
-	if !last.IsZero() && !ts.After(last) {
-		return time.Time{}
+	// Whole seconds first, so hours of running time don't overflow.
+	sec := uint64(d / time.Second)
+	rem := uint64(d % time.Second)
+	return uint32(sec*uint64(clockRate) + rem*uint64(clockRate)/uint64(time.Second))
+}
+
+// next returns the RTP timestamp for a sample. `running` is its capture time
+// and `valid` whether it has one.
+//
+// The timestamp is the capture time on the RTP clock. The SDK takes it as an
+// absolute position (media.Sample.PacketTimestamp), so a sample that is held
+// back stays the only one off: the next sample with a capture time is on real
+// time again. It holds a sample back in two cases, and this does the same to
+// stay in step with it:
+//   - no capture time, or one that doesn't move forward (the SDK rejects
+//     those, which would end the stream): one duration on from the last
+//     sample, as a sample published by duration alone;
+//   - less than its duration after the last sample: one duration on.
+func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
+	step := rtpTicks(duration, clockRate)
+	ts := c.last + step
+	if valid {
+		captured := rtpTimestampBase + rtpTicks(running, clockRate)
+		// Signed, so it also holds when the 32-bit timestamp wraps around
+		if !c.started || int32(captured-ts) > 0 {
+			ts = captured
+		}
+	} else if !c.started {
+		ts = rtpTimestampBase
 	}
+	if ts == 0 {
+		// Zero means "not given" to the SDK. One tick late, once every 13 hours
+		// of video.
+		ts = 1
+	}
+	c.started = true
+	c.last = ts
 	return ts
 }
 
-func createPublisherTrack(mimeType string, clock *captureClock, sync bool) (*publisherTrack, error) {
+func rtpClockRate(webrtcMime string) uint32 {
+	if webrtcMime == webrtc.MimeTypeOpus {
+		return 48000
+	}
+	return 90000
+}
+
+func createPublisherTrack(mimeType string, sync bool) (*publisherTrack, error) {
 	webrtcMime := ""
 	if mimeType == "audio/x-opus" {
 		webrtcMime = webrtc.MimeTypeOpus
@@ -105,9 +139,9 @@ func createPublisherTrack(mimeType string, clock *captureClock, sync bool) (*pub
 	}
 
 	pt := &publisherTrack{
-		mimeType: webrtcMime,
-		sink:     sink,
-		clock:    clock,
+		mimeType:  webrtcMime,
+		sink:      sink,
+		clockRate: rtpClockRate(webrtcMime),
 	}
 	sink.SetCallbacks(&app.SinkCallbacks{
 		EOSFunc:       pt.handleEOS,
@@ -168,13 +202,12 @@ func (t *publisherTrack) handleSample(sink *app.Sink) gst.FlowReturn {
 	if pts != gst.ClockTimeNone {
 		running = gst.ClockTime(segment.ToRunningTime(gst.FormatTime, uint64(pts)))
 	}
-	sampleTime := nextSampleTime(t.clock, t.lastSampleTime, time.Duration(running), running != gst.ClockTimeNone)
-	t.lastSampleTime = sampleTime
+	rtpTimestamp := t.rtp.next(time.Duration(running), running != gst.ClockTimeNone, time.Duration(duration), t.clockRate)
 
 	err := t.track.WriteSample(media.Sample{
-		Data:      buffer.Bytes(),
-		Duration:  time.Duration(duration),
-		Timestamp: sampleTime,
+		Data:            buffer.Bytes(),
+		Duration:        time.Duration(duration),
+		PacketTimestamp: rtpTimestamp,
 	}, nil)
 
 	switch {

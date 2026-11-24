@@ -15,50 +15,167 @@
 package main
 
 import (
+	"io"
 	"testing"
 	"time"
+
+	"github.com/pion/interceptor"
+	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
+
+	lksdk "github.com/livekit/server-sdk-go/v2"
 )
 
-func TestCaptureClockKeepsRunningTimeSpacing(t *testing.T) {
-	clock := &captureClock{}
-	first := clock.wallTime(2 * time.Second)
-	if since := time.Since(first); since < 0 || since > time.Second {
-		t.Fatalf("first sample should be anchored to now, got %v ago", since)
+// A stand-in for the peer connection a track is bound to. It keeps the RTP
+// timestamp of every packet the SDK sends.
+type recordingContext struct {
+	timestamps []uint32
+}
+
+func (c *recordingContext) CodecParameters() []webrtc.RTPCodecParameters {
+	return []webrtc.RTPCodecParameters{{
+		RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8, ClockRate: 90000},
+		PayloadType:        96,
+	}}
+}
+func (c *recordingContext) HeaderExtensions() []webrtc.RTPHeaderExtensionParameter { return nil }
+func (c *recordingContext) SSRC() webrtc.SSRC                                      { return 1 }
+func (c *recordingContext) SSRCRetransmission() webrtc.SSRC                        { return 0 }
+func (c *recordingContext) SSRCForwardErrorCorrection() webrtc.SSRC                { return 0 }
+func (c *recordingContext) WriteStream() webrtc.TrackLocalWriter                   { return c }
+func (c *recordingContext) ID() string                                             { return "test" }
+func (c *recordingContext) RTCPReader() interceptor.RTCPReader {
+	return interceptor.RTCPReaderFunc(func([]byte, interceptor.Attributes) (int, interceptor.Attributes, error) {
+		return 0, nil, io.EOF
+	})
+}
+func (c *recordingContext) WriteRTP(header *rtp.Header, _ []byte) (int, error) {
+	c.timestamps = append(c.timestamps, header.Timestamp)
+	return 0, nil
+}
+func (c *recordingContext) Write(b []byte) (int, error) { return len(b), nil }
+
+type timedSample struct {
+	// capture time in ms; negative means the buffer has no timestamp
+	running  int
+	duration int
+}
+
+// Publishes the samples the way handleSample does, through the SDK's own
+// packetizer, and returns each one's RTP time in ms from the first.
+func publishedTimes(t *testing.T, samples []timedSample) []int {
+	t.Helper()
+	track, err := lksdk.NewLocalTrack(webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeVP8})
+	if err != nil {
+		t.Fatal(err)
 	}
-	// A frame dropped upstream leaves a gap in running time. The gap has to
-	// survive, or RTP timestamps fall behind the clock.
-	if got := clock.wallTime(2*time.Second + 120*time.Millisecond).Sub(first); got != 120*time.Millisecond {
-		t.Fatalf("gap = %v, want 120ms", got)
+	ctx := &recordingContext{}
+	if _, err := track.Bind(ctx); err != nil {
+		t.Fatal(err)
 	}
-	// A second track that starts later lands on the same timeline.
-	if got := clock.wallTime(2*time.Second + 30*time.Millisecond).Sub(first); got != 30*time.Millisecond {
-		t.Fatalf("other track offset = %v, want 30ms", got)
+	var clock rtpClock
+	var times []int
+	for i, s := range samples {
+		before := len(ctx.timestamps)
+		ts := clock.next(time.Duration(s.running)*time.Millisecond, s.running >= 0, time.Duration(s.duration)*time.Millisecond, 90000)
+		err := track.WriteSample(media.Sample{
+			// A VP8 frame small enough for one packet
+			Data:            []byte{0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a},
+			Duration:        time.Duration(s.duration) * time.Millisecond,
+			PacketTimestamp: ts,
+		}, nil)
+		if err != nil {
+			t.Fatalf("sample %d: %v", i, err)
+		}
+		if len(ctx.timestamps) == before {
+			t.Fatalf("sample %d: nothing was sent", i)
+		}
+		times = append(times, int(int32(ctx.timestamps[before]-ctx.timestamps[0]))/90)
+	}
+	return times
+}
+
+func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
+	cases := []struct {
+		name    string
+		samples []timedSample
+		want    []int
+	}{
+		{
+			"steady frames",
+			[]timedSample{{1000, 40}, {1040, 40}, {1080, 40}},
+			[]int{0, 40, 80},
+		},
+		{
+			// A frame dropped upstream leaves a gap. Published by duration
+			// alone the timestamps would be 0, 40, 80, 120.
+			"a dropped frame keeps its gap",
+			[]timedSample{{0, 40}, {40, 40}, {120, 40}, {160, 40}},
+			[]int{0, 40, 120, 160},
+		},
+		{
+			"durations that differ from frame to frame",
+			[]timedSample{{0, 20}, {20, 40}, {60, 20}, {80, 40}, {120, 20}, {140, 40}, {180, 20}},
+			[]int{0, 20, 60, 80, 120, 140, 180},
+		},
+		{
+			// 5 ms after the last one is published a whole duration after it.
+			// The frame after that is on real time again.
+			"a frame captured early doesn't push the later ones back",
+			[]timedSample{{0, 40}, {40, 40}, {45, 40}, {120, 40}, {160, 40}},
+			[]int{0, 40, 80, 120, 160},
+		},
+		{
+			"a buffer without a timestamp goes one duration on, and the gap after it is kept",
+			[]timedSample{{0, 40}, {40, 40}, {-1, 40}, {200, 40}},
+			[]int{0, 40, 80, 200},
+		},
+		{
+			"a timestamp that goes backwards is published by duration, and the gap after it is kept",
+			[]timedSample{{0, 40}, {40, 40}, {20, 40}, {160, 40}},
+			[]int{0, 40, 80, 160},
+		},
+		{
+			"a first buffer without a timestamp",
+			[]timedSample{{-1, 40}, {5000, 40}, {5040, 40}},
+			[]int{0, 5000, 5040},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := publishedTimes(t, tc.samples)
+			for i := range tc.want {
+				if got[i] != tc.want[i] {
+					t.Fatalf("RTP times %v ms, want %v ms", got, tc.want)
+				}
+			}
+		})
 	}
 }
 
-func TestNextSampleTimeFallsBackToDuration(t *testing.T) {
-	clock := &captureClock{}
-	first := nextSampleTime(clock, time.Time{}, time.Second, true)
-	if first.IsZero() {
-		t.Fatal("a timestamped sample should get a capture time")
+func TestRTPClockCrossesTheTimestampWrap(t *testing.T) {
+	// 90 kHz timestamps wrap every 13 hours 15 minutes
+	wrap := time.Duration(1<<32) * time.Second / 90000
+	var clock rtpClock
+	before := clock.next(wrap-20*time.Millisecond, true, 40*time.Millisecond, 90000)
+	after := clock.next(wrap+20*time.Millisecond, true, 40*time.Millisecond, 90000)
+	if got := after - before; got != 3600 {
+		t.Fatalf("40 ms across the wrap came out as %d ticks, want 3600", got)
 	}
-	cases := []struct {
-		name    string
-		clock   *captureClock
-		running time.Duration
-		valid   bool
-	}{
-		{"buffer without a timestamp", clock, 0, false},
-		{"same time as the previous sample", clock, time.Second, true},
-		{"earlier than the previous sample", clock, 900 * time.Millisecond, true},
-		{"no clock", nil, 2 * time.Second, true},
+	if next := clock.next(wrap+60*time.Millisecond, true, 40*time.Millisecond, 90000); next == 0 {
+		t.Fatal("zero would be read as no timestamp")
 	}
-	for _, tc := range cases {
-		if got := nextSampleTime(tc.clock, first, tc.running, tc.valid); !got.IsZero() {
-			t.Errorf("%s: got %v, want the zero time", tc.name, got)
-		}
+}
+
+func TestRTPClockRates(t *testing.T) {
+	if got := rtpClockRate(webrtc.MimeTypeOpus); got != 48000 {
+		t.Errorf("Opus clock rate = %d, want 48000", got)
 	}
-	if next := nextSampleTime(clock, first, time.Second+40*time.Millisecond, true); next.Sub(first) != 40*time.Millisecond {
-		t.Errorf("next sample = %v after the first, want 40ms", next.Sub(first))
+	if got := rtpClockRate(webrtc.MimeTypeVP8); got != 90000 {
+		t.Errorf("VP8 clock rate = %d, want 90000", got)
+	}
+	if got := rtpTicks(20*time.Millisecond, 48000); got != 960 {
+		t.Errorf("20 ms of Opus = %d ticks, want 960", got)
 	}
 }

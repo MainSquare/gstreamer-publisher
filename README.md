@@ -44,10 +44,13 @@ Without `--allowed-users` the publisher does not read stdin at all and every par
 
 ### Latency and timestamps
 
-Samples are published with their capture time (the buffer's running time), so RTP timestamps follow real time even
-when the pipeline drops frames, for example in a leaky queue or a busy encoder. Published by duration alone, every
-dropped frame would leave the timestamps further behind the clock, and receivers answer that with a longer jitter
-buffer.
+Samples are published with their capture time (the buffer's running time), so each track's RTP timestamps follow
+real time even when the pipeline drops frames, for example in a leaky queue or a busy encoder. Published by duration
+alone, every dropped frame would leave the timestamps further behind the clock, and receivers answer that with a
+longer jitter buffer. A buffer without a timestamp, or with one that doesn't move forward, is published one duration
+after the last, and the next buffer with a timestamp is on real time again.
+
+This keeps the spacing within a track. It doesn't line audio up with video at the receiver.
 
 By default each sample is held until its timestamp plus the pipeline latency, which is the latency of the slowest
 branch. With an Opus branch next to the video that is about 50 ms, and video frames wait out most of it. Pass
