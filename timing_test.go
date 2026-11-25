@@ -157,6 +157,25 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 80, 160},
 		},
 		{
+			// Published a duration apart from there on, every frame after
+			// the missing timestamp would be 40 ms ahead for good.
+			"the frames after a buffer without a timestamp are on capture time again",
+			[]timedSample{{0, 40}, {40, 40}, {-1, 40}, {80, 40}, {120, 40}, {160, 40}},
+			[]int{0, 40, 80, 80, 120, 160},
+		},
+		{
+			"and so are the frames after a timestamp that went backwards a little",
+			[]timedSample{{0, 40}, {40, 40}, {20, 40}, {60, 40}, {100, 40}},
+			[]int{0, 40, 80, 80, 100},
+		},
+		{
+			// Capture times that start over: a tick apart they would all
+			// be shown at once.
+			"timestamps that start over are published a duration apart",
+			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {40, 40}, {80, 40}},
+			[]int{0, 40, 80, 120, 160},
+		},
+		{
 			"a first buffer without a timestamp",
 			[]timedSample{{-1, 40}, {5000, 40}, {5040, 40}},
 			[]int{0, 5000, 5040},

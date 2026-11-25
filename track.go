@@ -52,6 +52,9 @@ type publisherTrack struct {
 type rtpClock struct {
 	started bool
 	last    uint32
+	// The latest capture time seen so far, on the RTP clock
+	hasCapture  bool
+	lastCapture uint32
 }
 
 // rtpTimestampBase keeps the first timestamps away from zero, which the SDK
@@ -73,9 +76,11 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 //
 // The timestamp is the capture time on the RTP clock, whenever that is later
 // than the last sample's. A sample with no capture time, or with one that
-// doesn't move forward (the SDK rejects those, which would end the stream),
-// goes one duration on from the last sample instead, and at least one tick.
-// The next sample with a capture time is on real time again.
+// went backwards (the SDK rejects a timestamp that doesn't move forward,
+// which would end the stream), goes one duration on from the last sample
+// instead, and at least one tick. That can put it past the capture time of
+// the sample that follows. That one goes a single tick on, not another
+// duration, so that the one after it is on real time again.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
 	ts := uint32(rtpTimestampBase)
 	if c.started {
@@ -83,9 +88,17 @@ func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duratio
 	}
 	if valid {
 		captured := rtpTimestampBase + rtpTicks(running, clockRate)
-		// Signed, so it also holds when the 32-bit timestamp wraps around
-		if !c.started || int32(captured-c.last) > 0 {
+		// Signed, so these also hold when the 32-bit timestamp wraps around
+		movedOn := !c.hasCapture || int32(captured-c.lastCapture) > 0
+		switch {
+		case !c.started || int32(captured-c.last) > 0:
 			ts = captured
+		case movedOn:
+			ts = c.last + 1
+		}
+		if movedOn {
+			c.hasCapture = true
+			c.lastCapture = captured
 		}
 	}
 	if ts == 0 {
