@@ -71,26 +71,22 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 // next returns the RTP timestamp for a sample. `running` is its capture time
 // and `valid` whether it has one.
 //
-// The timestamp is the capture time on the RTP clock. The SDK takes it as an
-// absolute position (media.Sample.PacketTimestamp), so a sample that is held
-// back stays the only one off: the next sample with a capture time is on real
-// time again. It holds a sample back in two cases, and this does the same to
-// stay in step with it:
-//   - no capture time, or one that doesn't move forward (the SDK rejects
-//     those, which would end the stream): one duration on from the last
-//     sample, as a sample published by duration alone;
-//   - less than its duration after the last sample: one duration on.
+// The timestamp is the capture time on the RTP clock, whenever that is later
+// than the last sample's. A sample with no capture time, or with one that
+// doesn't move forward (the SDK rejects those, which would end the stream),
+// goes one duration on from the last sample instead, and at least one tick.
+// The next sample with a capture time is on real time again.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
-	step := rtpTicks(duration, clockRate)
-	ts := c.last + step
+	ts := uint32(rtpTimestampBase)
+	if c.started {
+		ts = c.last + max(rtpTicks(duration, clockRate), 1)
+	}
 	if valid {
 		captured := rtpTimestampBase + rtpTicks(running, clockRate)
 		// Signed, so it also holds when the 32-bit timestamp wraps around
-		if !c.started || int32(captured-ts) > 0 {
+		if !c.started || int32(captured-c.last) > 0 {
 			ts = captured
 		}
-	} else if !c.started {
-		ts = rtpTimestampBase
 	}
 	if ts == 0 {
 		// Zero means "not given" to the SDK. One tick late, once every 13 hours
@@ -100,6 +96,19 @@ func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duratio
 	c.started = true
 	c.last = ts
 	return ts
+}
+
+// sdkSampleDuration is the duration every sample is handed to the SDK with:
+// one tick of the RTP clock (the nanosecond on top keeps the SDK's rounding
+// from making it none). The SDK uses a sample's duration twice over. It
+// publishes a sample no sooner than one duration after the last, and it moves
+// its packetizer on by the duration once the sample is out. With the buffer's
+// own duration, a frame captured less than a frame after the last one went
+// out late and took every frame behind it along, and two samples of different
+// durations came out apart by the difference. With one tick, a sample goes
+// out at the timestamp it is given.
+func sdkSampleDuration(clockRate uint32) time.Duration {
+	return time.Second/time.Duration(clockRate) + time.Nanosecond
 }
 
 func rtpClockRate(webrtcMime string) uint32 {
@@ -206,7 +215,7 @@ func (t *publisherTrack) handleSample(sink *app.Sink) gst.FlowReturn {
 
 	err := t.track.WriteSample(media.Sample{
 		Data:            buffer.Bytes(),
-		Duration:        time.Duration(duration),
+		Duration:        sdkSampleDuration(t.clockRate),
 		PacketTimestamp: rtpTimestamp,
 	}, nil)
 

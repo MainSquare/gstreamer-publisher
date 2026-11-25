@@ -82,7 +82,7 @@ func publishedTimes(t *testing.T, samples []timedSample) []int {
 		err := track.WriteSample(media.Sample{
 			// A VP8 frame small enough for one packet
 			Data:            []byte{0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a},
-			Duration:        time.Duration(s.duration) * time.Millisecond,
+			Duration:        sdkSampleDuration(90000),
 			PacketTimestamp: ts,
 		}, nil)
 		if err != nil {
@@ -120,11 +120,31 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 20, 60, 80, 120, 140, 180},
 		},
 		{
-			// 5 ms after the last one is published a whole duration after it.
-			// The frame after that is on real time again.
-			"a frame captured early doesn't push the later ones back",
+			"a frame captured right after the last one is published right after it",
 			[]timedSample{{0, 40}, {40, 40}, {45, 40}, {120, 40}, {160, 40}},
-			[]int{0, 40, 80, 120, 160},
+			[]int{0, 40, 45, 120, 160},
+		},
+		{
+			// Captured late, then on time again: published a whole duration
+			// apart, every frame after the late one would be 39 ms ahead.
+			"a late frame doesn't push the ones after it ahead",
+			[]timedSample{{0, 40}, {40, 40}, {41, 40}, {81, 40}, {121, 40}},
+			[]int{0, 40, 41, 81, 121},
+		},
+		{
+			"a gap between two samples of different durations is kept as it is",
+			[]timedSample{{0, 20}, {100, 40}, {140, 40}},
+			[]int{0, 100, 140},
+		},
+		{
+			"a long sample before a short one",
+			[]timedSample{{0, 40}, {40, 20}, {60, 40}, {100, 20}},
+			[]int{0, 40, 60, 100},
+		},
+		{
+			"a buffer without a timestamp before one of another duration",
+			[]timedSample{{0, 40}, {40, 40}, {-1, 40}, {200, 20}},
+			[]int{0, 40, 80, 200},
 		},
 		{
 			"a buffer without a timestamp goes one duration on, and the gap after it is kept",
@@ -177,5 +197,11 @@ func TestRTPClockRates(t *testing.T) {
 	}
 	if got := rtpTicks(20*time.Millisecond, 48000); got != 960 {
 		t.Errorf("20 ms of Opus = %d ticks, want 960", got)
+	}
+	// The way the SDK counts a sample's duration in ticks
+	for _, rate := range []uint32{48000, 90000} {
+		if got := uint32(sdkSampleDuration(rate).Seconds() * float64(rate)); got != 1 {
+			t.Errorf("the SDK reads the duration at %d Hz as %d ticks, want 1", rate, got)
+		}
 	}
 }
