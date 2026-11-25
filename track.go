@@ -41,9 +41,93 @@ type publisherTrack struct {
 	isEnded               atomic.Bool
 	onEOS                 func()
 	lastKeyframeRequestNs atomic.Int64
+	clockRate             uint32
+	// only touched from the appsink's streaming thread
+	rtp rtpClock
 }
 
-func createPublisherTrack(mimeType string) (*publisherTrack, error) {
+// rtpClock turns each sample's capture time (its GStreamer running time) into
+// the RTP timestamp it is published with, so RTP timestamps follow real time.
+// A sample without a usable capture time goes one duration on from the last.
+type rtpClock struct {
+	started bool
+	last    uint32
+}
+
+// rtpTimestampBase keeps the first timestamps away from zero, which the SDK
+// reads as "no timestamp given".
+const rtpTimestampBase = 1 << 16
+
+func rtpTicks(d time.Duration, clockRate uint32) uint32 {
+	if d <= 0 {
+		return 0
+	}
+	// Whole seconds first, so hours of running time don't overflow.
+	sec := uint64(d / time.Second)
+	rem := uint64(d % time.Second)
+	return uint32(sec*uint64(clockRate) + rem*uint64(clockRate)/uint64(time.Second))
+}
+
+// next returns the RTP timestamp for a sample. `running` is its capture time
+// and `valid` whether it has one.
+//
+// The timestamp is the capture time on the RTP clock, whenever that is later
+// than the last sample's. The SDK rejects a timestamp that doesn't move
+// forward, which would end the stream, so the others get one that does:
+//   - No capture time: one duration on from the last sample, and at least one
+//     tick.
+//   - A capture time that isn't after the last timestamp (the sample before
+//     had none and went a duration on, or time went back): one tick on. The
+//     first sample that is after the last timestamp again is on capture time.
+//
+// Capture times are expected to move forward, as a live source's do. An
+// encoder that reorders frames (H.264 with B-frames) has them going back and
+// forth, which WebRTC receivers don't put back in order either.
+func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
+	ts := uint32(rtpTimestampBase)
+	if c.started {
+		ts = c.last + max(rtpTicks(duration, clockRate), 1)
+	}
+	if valid {
+		captured := rtpTimestampBase + rtpTicks(running, clockRate)
+		// Signed, so it also holds when the 32-bit timestamp wraps around
+		if !c.started || int32(captured-c.last) > 0 {
+			ts = captured
+		} else {
+			ts = c.last + 1
+		}
+	}
+	if ts == 0 {
+		// Zero means "not given" to the SDK. One tick late, once every 13 hours
+		// of video.
+		ts = 1
+	}
+	c.started = true
+	c.last = ts
+	return ts
+}
+
+// sdkSampleDuration is the duration every sample is handed to the SDK with:
+// one tick of the RTP clock (the nanosecond on top keeps the SDK's rounding
+// from making it none). The SDK uses a sample's duration twice over. It
+// publishes a sample no sooner than one duration after the last, and it moves
+// its packetizer on by the duration once the sample is out. With the buffer's
+// own duration, a frame captured less than a frame after the last one went
+// out late and took every frame behind it along, and two samples of different
+// durations came out apart by the difference. With one tick, a sample goes
+// out at the timestamp it is given.
+func sdkSampleDuration(clockRate uint32) time.Duration {
+	return time.Second/time.Duration(clockRate) + time.Nanosecond
+}
+
+func rtpClockRate(webrtcMime string) uint32 {
+	if webrtcMime == webrtc.MimeTypeOpus {
+		return 48000
+	}
+	return 90000
+}
+
+func createPublisherTrack(mimeType string, sync bool) (*publisherTrack, error) {
 	webrtcMime := ""
 	if mimeType == "audio/x-opus" {
 		webrtcMime = webrtc.MimeTypeOpus
@@ -64,9 +148,18 @@ func createPublisherTrack(mimeType string) (*publisherTrack, error) {
 		return nil, err
 	}
 
+	if !sync {
+		// With sync on, the sink holds each sample until its timestamp plus the
+		// pipeline latency, which is the slowest branch's (audio: about 50 ms).
+		if err := sink.Element.SetProperty("sync", false); err != nil {
+			return nil, err
+		}
+	}
+
 	pt := &publisherTrack{
-		mimeType: webrtcMime,
-		sink:     sink,
+		mimeType:  webrtcMime,
+		sink:      sink,
+		clockRate: rtpClockRate(webrtcMime),
 	}
 	sink.SetCallbacks(&app.SinkCallbacks{
 		EOSFunc:       pt.handleEOS,
@@ -117,12 +210,22 @@ func (t *publisherTrack) handleSample(sink *app.Sink) gst.FlowReturn {
 	}
 
 	duration := buffer.Duration()
-	// pts := buffer.PresentationTimestamp()
-	// ts := time.Duration(segment.ToRunningTime(gst.FormatTime, uint64(pts)))
+
+	// Publish with the capture time, so RTP timestamps follow real time. With
+	// only a duration they advance one frame per sample, and every frame the
+	// pipeline drops (a leaky queue, a busy encoder) leaves them further behind
+	// the clock, which receivers answer with a longer jitter buffer.
+	pts := buffer.PresentationTimestamp()
+	running := gst.ClockTimeNone
+	if pts != gst.ClockTimeNone {
+		running = gst.ClockTime(segment.ToRunningTime(gst.FormatTime, uint64(pts)))
+	}
+	rtpTimestamp := t.rtp.next(time.Duration(running), running != gst.ClockTimeNone, time.Duration(duration), t.clockRate)
 
 	err := t.track.WriteSample(media.Sample{
-		Data:     buffer.Bytes(),
-		Duration: time.Duration(duration),
+		Data:            buffer.Bytes(),
+		Duration:        sdkSampleDuration(t.clockRate),
+		PacketTimestamp: rtpTimestamp,
 	}, nil)
 
 	switch {

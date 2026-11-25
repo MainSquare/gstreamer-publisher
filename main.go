@@ -45,7 +45,7 @@ func main() {
 		Name:      "gstreamer-publisher",
 		Usage:     "Publish video/audio from a GStreamer pipeline to LiveKit",
 		Version:   "0.1.0",
-		UsageText: "gstreamer-publisher --url <url> --token <token> [--delay second] -- <gst-launch parameters>",
+		UsageText: "gstreamer-publisher --url <url> --token <token> [--delay second] [--no-sync] -- <gst-launch parameters>",
 		Flags: []cli.Flag{
 			&cli.StringFlag{
 				Name:    "url",
@@ -68,6 +68,10 @@ func main() {
 				Usage: "comma-separated LiveKit participant identities allowed to subscribe to published tracks",
 			},
 			&cli.BoolFlag{
+				Name:  "no-sync",
+				Usage: "publish each sample as soon as it is encoded instead of holding it for the pipeline latency (for live sources: a file would go out as fast as it encodes)",
+			},
+			&cli.BoolFlag{
 				Name: "verbose",
 			},
 		},
@@ -77,6 +81,7 @@ func main() {
 				Token:          c.String("token"),
 				PipelineString: strings.Join(c.Args().Slice(), " "),
 				AllowedUsers:   parseAllowedUsers(c.String("allowed-users")),
+				NoSync:         c.Bool("no-sync"),
 			})
 			if delay := c.Int("delay"); delay != 0 {
 				time.Sleep(time.Duration(delay) * time.Second)

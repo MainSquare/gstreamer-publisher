@@ -53,6 +53,9 @@ type PublisherParams struct {
 	Token          string
 	PipelineString string
 	AllowedUsers   []string
+	// NoSync publishes each sample as soon as it is encoded, instead of
+	// holding it for the pipeline latency.
+	NoSync bool
 }
 
 type Publisher struct {
@@ -319,7 +322,7 @@ func (p *Publisher) initialize() error {
 		} else if p.audioTrack != nil && target.isAudio {
 			return errors.New("pipeline has more than one audio source")
 		}
-		pt, err := createPublisherTrack(target.mimeType)
+		pt, err := createPublisherTrack(target.mimeType, !p.params.NoSync)
 		if err != nil {
 			return err
 		}

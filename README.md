@@ -42,6 +42,27 @@ to the published tracks:
 
 Without `--allowed-users` the publisher does not read stdin at all and every participant in the room can subscribe.
 
+### Latency and timestamps
+
+Samples are published with their capture time (the buffer's running time), so each track's RTP timestamps follow
+real time even when the pipeline drops frames, for example in a leaky queue or a busy encoder. Published by duration
+alone, every dropped frame would leave the timestamps further behind the clock, and receivers answer that with a
+longer jitter buffer. A buffer without a timestamp is published one duration after the last, and one whose timestamp
+doesn't move forward one RTP tick after it; the next buffer with a later timestamp is on real time again. Timestamps
+are expected to move forward, as a live source's do: an encoder that reorders frames (H.264 with B-frames) isn't
+supported, as in WebRTC generally.
+
+This keeps the spacing within a track. It doesn't line audio up with video at the receiver.
+
+By default each sample is held until its timestamp plus the pipeline latency, which is the latency of the slowest
+branch. With an Opus branch next to the video that is about 50 ms, and video frames wait out most of it. Pass
+`--no-sync` to publish each sample as soon as it is encoded. Video then leaves a little ahead of the audio captured
+at the same moment (the difference between the two branches' encode times, around 10 to 30 ms).
+
+`--no-sync` is for live sources (a screen, a camera, a microphone), which produce samples in real time by themselves.
+The wait it removes is also what paces a file: published with `--no-sync`, a file goes out as fast as it encodes, and
+the tracks end when the file does, before viewers have played it.
+
 ## Examples
 
 The examples below assume you have the following environment variables defined:
