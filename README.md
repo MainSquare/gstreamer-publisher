@@ -60,6 +60,10 @@ branch. With an Opus branch next to the video that is about 50 ms, and video fra
 `--no-sync` to publish each sample as soon as it is encoded. Video then leaves a little ahead of the audio captured
 at the same moment (the difference between the two branches' encode times, around 10 to 30 ms).
 
+`--no-sync` is for live sources (a screen, a camera, a microphone), which produce samples in real time by themselves.
+The wait it removes is also what paces a file: published with `--no-sync`, a file goes out as fast as it encodes, and
+the tracks end when the file does, before viewers have played it.
+
 ## Examples
 
 The examples below assume you have the following environment variables defined:

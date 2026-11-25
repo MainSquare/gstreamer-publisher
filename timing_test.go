@@ -230,16 +230,25 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 }
 
 func TestRTPClockCrossesTheTimestampWrap(t *testing.T) {
-	// 90 kHz timestamps wrap every 13 hours 15 minutes
-	wrap := time.Duration(1<<32) * time.Second / 90000
+	// One tick a millisecond, so the times below are whole ticks. The clock
+	// starts rtpTimestampBase in, so it wraps that much before 2^32 ticks of
+	// running time.
+	const rate = 1000
+	wrap := time.Duration(1<<32-rtpTimestampBase) * time.Millisecond
 	var clock rtpClock
-	before := clock.next(wrap-20*time.Millisecond, true, 40*time.Millisecond, 90000)
-	after := clock.next(wrap+20*time.Millisecond, true, 40*time.Millisecond, 90000)
-	if got := after - before; got != 3600 {
-		t.Fatalf("40 ms across the wrap came out as %d ticks, want 3600", got)
+	before := clock.next(wrap-20*time.Millisecond, true, 20*time.Millisecond, rate)
+	at := clock.next(wrap, true, 20*time.Millisecond, rate)
+	after := clock.next(wrap+20*time.Millisecond, true, 20*time.Millisecond, rate)
+	if before != 1<<32-20 {
+		t.Fatalf("20 ms before the wrap is timestamp %d, want %d", before, uint32(1<<32-20))
 	}
-	if next := clock.next(wrap+60*time.Millisecond, true, 40*time.Millisecond, 90000); next == 0 {
-		t.Fatal("zero would be read as no timestamp")
+	// Exactly on the wrap the timestamp would be zero, which the SDK reads
+	// as "not given"
+	if at != 1 {
+		t.Fatalf("the timestamp on the wrap is %d, want 1", at)
+	}
+	if after != 20 {
+		t.Fatalf("20 ms after the wrap is timestamp %d, want 20", after)
 	}
 }
 

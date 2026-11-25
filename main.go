@@ -69,7 +69,7 @@ func main() {
 			},
 			&cli.BoolFlag{
 				Name:  "no-sync",
-				Usage: "publish each sample as soon as it is encoded instead of holding it for the pipeline latency",
+				Usage: "publish each sample as soon as it is encoded instead of holding it for the pipeline latency (for live sources: a file would go out as fast as it encodes)",
 			},
 			&cli.BoolFlag{
 				Name: "verbose",
