@@ -52,16 +52,6 @@ type publisherTrack struct {
 type rtpClock struct {
 	started bool
 	last    uint32
-	// Added to every capture time: where capture times that started over
-	// carry on from
-	offset uint32
-	// The capture time of the last sample that had one
-	hasCaptured bool
-	captured    uint32
-	// The sample before this one had a capture time before that of the
-	// sample before it: the timestamp it got
-	wentBack  bool
-	backStamp uint32
 }
 
 // rtpTimestampBase keeps the first timestamps away from zero, which the SDK
@@ -88,50 +78,29 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 //     tick.
 //   - A capture time that isn't after the last timestamp (the sample before
 //     had none and went a duration on, or time went back): one tick on. The
-//     first sample that is after the last timestamp again is on capture time
-//     as if nothing had happened.
-//   - A capture time that went back, followed by one that goes on from it and
-//     still isn't after the last timestamp: capture times have started over.
-//     The samples carry on from the timestamp the first of them got, with
-//     their own spacing. A tick apart, they would all be for the same instant
-//     until capture time had caught up. One sample alone doesn't settle it: a
-//     single stray capture time would move every sample after it.
+//     first sample that is after the last timestamp again is on capture time.
 //
-// Capture times are expected in the order the samples are sent. An encoder
-// that reorders frames (H.264 with B-frames) has them going back and forth,
-// which WebRTC receivers don't put back in order either.
+// Capture times are expected to move forward, as a live source's do. An
+// encoder that reorders frames (H.264 with B-frames) has them going back and
+// forth, which WebRTC receivers don't put back in order either.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
 	ts := uint32(rtpTimestampBase)
 	if c.started {
 		ts = c.last + max(rtpTicks(duration, clockRate), 1)
 	}
-	// Only the very next sample can settle it: one without a capture time
-	// in between, and the question is dropped
-	wentBack := c.wentBack
-	c.wentBack = false
 	if valid {
 		captured := rtpTimestampBase + rtpTicks(running, clockRate)
-		// Signed comparisons, so they also hold when the 32-bit timestamp
-		// wraps around
-		movedOn := !c.hasCaptured || int32(captured-c.captured) > 0
-		if wentBack && movedOn && int32(c.last-(captured+c.offset)) >= 0 {
-			c.offset = c.backStamp - c.captured
-		}
-		if !c.started || int32(captured+c.offset-c.last) > 0 {
-			ts = captured + c.offset
+		// Signed, so it also holds when the 32-bit timestamp wraps around
+		if !c.started || int32(captured-c.last) > 0 {
+			ts = captured
 		} else {
 			ts = c.last + 1
-			c.wentBack = c.hasCaptured && int32(captured-c.captured) < 0
-			c.backStamp = ts
 		}
-		c.hasCaptured = true
-		c.captured = captured
 	}
 	if ts == 0 {
 		// Zero means "not given" to the SDK. One tick late, once every 13 hours
 		// of video.
 		ts = 1
-		c.backStamp = ts
 	}
 	c.started = true
 	c.last = ts
