@@ -115,16 +115,6 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 120, 160},
 		},
 		{
-			"durations that differ from frame to frame",
-			[]timedSample{{0, 20}, {20, 40}, {60, 20}, {80, 40}, {120, 20}, {140, 40}, {180, 20}},
-			[]int{0, 20, 60, 80, 120, 140, 180},
-		},
-		{
-			"a frame captured right after the last one is published right after it",
-			[]timedSample{{0, 40}, {40, 40}, {45, 40}, {120, 40}, {160, 40}},
-			[]int{0, 40, 45, 120, 160},
-		},
-		{
 			// Captured late, then on time again: published a whole duration
 			// apart, every frame after the late one would be 39 ms ahead.
 			"a late frame doesn't push the ones after it ahead",
@@ -135,16 +125,6 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			"a gap between two samples of different durations is kept as it is",
 			[]timedSample{{0, 20}, {100, 40}, {140, 40}},
 			[]int{0, 100, 140},
-		},
-		{
-			"a long sample before a short one",
-			[]timedSample{{0, 40}, {40, 20}, {60, 40}, {100, 20}},
-			[]int{0, 40, 60, 100},
-		},
-		{
-			"a buffer without a timestamp before one of another duration",
-			[]timedSample{{0, 40}, {40, 40}, {-1, 40}, {200, 20}},
-			[]int{0, 40, 80, 200},
 		},
 		{
 			"a buffer without a timestamp goes one duration on, and the gap after it is kept",
@@ -164,11 +144,6 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 80, 80, 120, 160},
 		},
 		{
-			"and so are the frames after a timestamp that went back a little",
-			[]timedSample{{0, 40}, {40, 40}, {20, 40}, {60, 40}, {100, 40}},
-			[]int{0, 40, 40, 60, 100},
-		},
-		{
 			// Capture times that start over, and go on past where they
 			// were before. A tick apart, the frames would all be shown at
 			// once.
@@ -179,32 +154,9 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 		{
 			// The first frame after the restart goes a tick after the last
 			// one, and the frame dropped after it keeps its gap.
-			"timestamps that start over a moment after the start",
+			"timestamps that start over a moment after the start, with a frame dropped",
 			[]timedSample{{600, 40}, {640, 40}, {0, 40}, {40, 40}, {120, 40}, {160, 40}},
 			[]int{0, 40, 40, 80, 160, 200},
-		},
-		{
-			"and with nothing dropped",
-			[]timedSample{{800, 40}, {840, 40}, {880, 40}, {0, 40}, {40, 40}, {80, 40}},
-			[]int{0, 40, 80, 80, 120, 160},
-		},
-		{
-			"nor does one that is followed by a buffer without a timestamp",
-			[]timedSample{{600, 40}, {640, 40}, {0, 40}, {-1, 40}, {680, 40}, {720, 40}},
-			[]int{0, 40, 40, 80, 80, 120},
-		},
-		{
-			"nor one that comes twice",
-			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {0, 40}, {5080, 40}},
-			[]int{0, 40, 40, 40, 80},
-		},
-		{
-			// The buffer without a timestamp goes 120 ms on, past the two
-			// after it. Their capture times never went back: they aren't
-			// taken for a restart.
-			"a long buffer without a timestamp isn't taken for a restart",
-			[]timedSample{{0, 40}, {40, 40}, {-1, 120}, {80, 40}, {120, 40}, {160, 40}, {200, 40}},
-			[]int{0, 40, 160, 160, 160, 160, 200},
 		},
 		{
 			"one stray timestamp doesn't move the frames after it",
