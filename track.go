@@ -52,9 +52,9 @@ type publisherTrack struct {
 type rtpClock struct {
 	started bool
 	last    uint32
-	// The latest capture time seen so far, on the RTP clock
-	hasCapture  bool
-	lastCapture uint32
+	// Added to every capture time: where capture times that started over
+	// carry on from
+	offset uint32
 }
 
 // rtpTimestampBase keeps the first timestamps away from zero, which the SDK
@@ -75,30 +75,34 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 // and `valid` whether it has one.
 //
 // The timestamp is the capture time on the RTP clock, whenever that is later
-// than the last sample's. A sample with no capture time, or with one that
-// went backwards (the SDK rejects a timestamp that doesn't move forward,
-// which would end the stream), goes one duration on from the last sample
-// instead, and at least one tick. That can put it past the capture time of
-// the sample that follows. That one goes a single tick on, not another
-// duration, so that the one after it is on real time again.
+// than the last sample's. The SDK rejects a timestamp that doesn't move
+// forward, which would end the stream, so the others get one that does:
+//   - No capture time: one duration on from the last sample, and at least one
+//     tick.
+//   - A capture time at or a little before the last timestamp (the sample
+//     before had none and went a duration on, or it went back a little): one
+//     tick on, so that the sample after it is on capture time again.
+//   - A capture time a second or more before it: capture times have started
+//     over. This one goes a duration on, and the ones after it keep their
+//     spacing from there. A tick apart, they would all be for the same
+//     instant until capture time had caught up.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
+	step := max(rtpTicks(duration, clockRate), 1)
 	ts := uint32(rtpTimestampBase)
 	if c.started {
-		ts = c.last + max(rtpTicks(duration, clockRate), 1)
+		ts = c.last + step
 	}
 	if valid {
-		captured := rtpTimestampBase + rtpTicks(running, clockRate)
-		// Signed, so these also hold when the 32-bit timestamp wraps around
-		movedOn := !c.hasCapture || int32(captured-c.lastCapture) > 0
+		captured := rtpTimestampBase + rtpTicks(running, clockRate) + c.offset
+		// Signed, so it also holds when the 32-bit timestamp wraps around
+		behind := int32(c.last - captured)
 		switch {
-		case !c.started || int32(captured-c.last) > 0:
+		case !c.started || behind < 0:
 			ts = captured
-		case movedOn:
+		case uint32(behind) < clockRate:
 			ts = c.last + 1
-		}
-		if movedOn {
-			c.hasCapture = true
-			c.lastCapture = captured
+		default:
+			c.offset += ts - captured
 		}
 	}
 	if ts == 0 {

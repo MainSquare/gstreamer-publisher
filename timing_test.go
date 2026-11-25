@@ -152,9 +152,9 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 80, 200},
 		},
 		{
-			"a timestamp that goes backwards is published by duration, and the gap after it is kept",
+			"a timestamp that goes back a little is published right after the last, and the gap after it is kept",
 			[]timedSample{{0, 40}, {40, 40}, {20, 40}, {160, 40}},
-			[]int{0, 40, 80, 160},
+			[]int{0, 40, 40, 160},
 		},
 		{
 			// Published a duration apart from there on, every frame after
@@ -164,16 +164,17 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 80, 80, 120, 160},
 		},
 		{
-			"and so are the frames after a timestamp that went backwards a little",
+			"and so are the frames after a timestamp that went back a little",
 			[]timedSample{{0, 40}, {40, 40}, {20, 40}, {60, 40}, {100, 40}},
-			[]int{0, 40, 80, 80, 100},
+			[]int{0, 40, 40, 60, 100},
 		},
 		{
-			// Capture times that start over: a tick apart they would all
-			// be shown at once.
-			"timestamps that start over are published a duration apart",
-			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {40, 40}, {80, 40}},
-			[]int{0, 40, 80, 120, 160},
+			// Capture times that start over, and go on past where they
+			// were before. A tick apart, the frames would all be shown at
+			// once.
+			"timestamps that start over keep their spacing from there",
+			[]timedSample{{5000, 1000}, {6000, 1000}, {0, 1000}, {1000, 1000}, {3000, 1000}, {4000, 1000}, {5000, 1000}, {6000, 1000}, {7000, 1000}, {8000, 1000}},
+			[]int{0, 1000, 2000, 3000, 5000, 6000, 7000, 8000, 9000, 10000},
 		},
 		{
 			"a first buffer without a timestamp",
