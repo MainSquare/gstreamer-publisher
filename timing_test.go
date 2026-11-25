@@ -174,7 +174,24 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			// once.
 			"timestamps that start over keep their spacing from there",
 			[]timedSample{{5000, 1000}, {6000, 1000}, {0, 1000}, {1000, 1000}, {3000, 1000}, {4000, 1000}, {5000, 1000}, {6000, 1000}, {7000, 1000}, {8000, 1000}},
-			[]int{0, 1000, 2000, 3000, 5000, 6000, 7000, 8000, 9000, 10000},
+			[]int{0, 1000, 1000, 2000, 4000, 5000, 6000, 7000, 8000, 9000},
+		},
+		{
+			// The first frame after the restart goes a tick after the last
+			// one, and the frame dropped after it keeps its gap.
+			"timestamps that start over a moment after the start",
+			[]timedSample{{600, 40}, {640, 40}, {0, 40}, {40, 40}, {120, 40}, {160, 40}},
+			[]int{0, 40, 40, 80, 160, 200},
+		},
+		{
+			"and with nothing dropped",
+			[]timedSample{{800, 40}, {840, 40}, {880, 40}, {0, 40}, {40, 40}, {80, 40}},
+			[]int{0, 40, 80, 80, 120, 160},
+		},
+		{
+			"one stray timestamp doesn't move the frames after it",
+			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {5080, 40}, {5120, 40}},
+			[]int{0, 40, 40, 80, 120},
 		},
 		{
 			"a first buffer without a timestamp",

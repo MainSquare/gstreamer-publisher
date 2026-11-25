@@ -47,8 +47,10 @@ Without `--allowed-users` the publisher does not read stdin at all and every par
 Samples are published with their capture time (the buffer's running time), so each track's RTP timestamps follow
 real time even when the pipeline drops frames, for example in a leaky queue or a busy encoder. Published by duration
 alone, every dropped frame would leave the timestamps further behind the clock, and receivers answer that with a
-longer jitter buffer. A buffer without a timestamp, or with one that doesn't move forward, is published one duration
-after the last, and the next buffer with a timestamp is on real time again.
+longer jitter buffer. A buffer without a timestamp is published one duration after the last, and one whose timestamp
+doesn't move forward one RTP tick after it; the next buffer with a later timestamp is on real time again. When the
+timestamps have started over (two buffers in a row that are behind, the second after the first), the buffers carry on
+from there with their own spacing.
 
 This keeps the spacing within a track. It doesn't line audio up with video at the receiver.
 

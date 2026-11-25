@@ -55,6 +55,11 @@ type rtpClock struct {
 	// Added to every capture time: where capture times that started over
 	// carry on from
 	offset uint32
+	// The sample before this one had a capture time that wasn't after the
+	// timestamp before it: that capture time, and the timestamp it got
+	wentBack     bool
+	backCaptured uint32
+	backStamp    uint32
 }
 
 // rtpTimestampBase keeps the first timestamps away from zero, which the SDK
@@ -79,36 +84,43 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 // forward, which would end the stream, so the others get one that does:
 //   - No capture time: one duration on from the last sample, and at least one
 //     tick.
-//   - A capture time at or a little before the last timestamp (the sample
-//     before had none and went a duration on, or it went back a little): one
-//     tick on, so that the sample after it is on capture time again.
-//   - A capture time a second or more before it: capture times have started
-//     over. This one goes a duration on, and the ones after it keep their
-//     spacing from there. A tick apart, they would all be for the same
-//     instant until capture time had caught up.
+//   - A capture time that isn't after the last timestamp (the sample before
+//     had none and went a duration on, or time went back): one tick on. If
+//     the next sample is after the last timestamp again, it is on capture
+//     time as if nothing had happened.
+//   - If the next sample goes on from the one that went back and is still not
+//     after the last timestamp, capture times have started over. The samples
+//     carry on from the timestamp the first of them got, with their own
+//     spacing. A tick apart, they would all be for the same instant until
+//     capture time had caught up. One sample alone doesn't settle it: a
+//     single stray capture time would move every sample after it.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
-	step := max(rtpTicks(duration, clockRate), 1)
 	ts := uint32(rtpTimestampBase)
 	if c.started {
-		ts = c.last + step
+		ts = c.last + max(rtpTicks(duration, clockRate), 1)
 	}
 	if valid {
-		captured := rtpTimestampBase + rtpTicks(running, clockRate) + c.offset
-		// Signed, so it also holds when the 32-bit timestamp wraps around
-		behind := int32(c.last - captured)
-		switch {
-		case !c.started || behind < 0:
-			ts = captured
-		case uint32(behind) < clockRate:
+		captured := rtpTimestampBase + rtpTicks(running, clockRate)
+		// Signed comparisons, so they also hold when the 32-bit timestamp
+		// wraps around
+		if c.wentBack && int32(captured-c.backCaptured) >= 0 && int32(c.last-(captured+c.offset)) >= 0 {
+			c.offset = c.backStamp - c.backCaptured
+		}
+		c.wentBack = false
+		if !c.started || int32(captured+c.offset-c.last) > 0 {
+			ts = captured + c.offset
+		} else {
 			ts = c.last + 1
-		default:
-			c.offset += ts - captured
+			c.wentBack = true
+			c.backCaptured = captured
+			c.backStamp = ts
 		}
 	}
 	if ts == 0 {
 		// Zero means "not given" to the SDK. One tick late, once every 13 hours
 		// of video.
 		ts = 1
+		c.backStamp = ts
 	}
 	c.started = true
 	c.last = ts
