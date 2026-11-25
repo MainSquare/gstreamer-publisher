@@ -189,6 +189,24 @@ func TestPublishedTimestampsFollowCaptureTime(t *testing.T) {
 			[]int{0, 40, 80, 80, 120, 160},
 		},
 		{
+			"nor does one that is followed by a buffer without a timestamp",
+			[]timedSample{{600, 40}, {640, 40}, {0, 40}, {-1, 40}, {680, 40}, {720, 40}},
+			[]int{0, 40, 40, 80, 80, 120},
+		},
+		{
+			"nor one that comes twice",
+			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {0, 40}, {5080, 40}},
+			[]int{0, 40, 40, 40, 80},
+		},
+		{
+			// The buffer without a timestamp goes 120 ms on, past the two
+			// after it. Their capture times never went back: they aren't
+			// taken for a restart.
+			"a long buffer without a timestamp isn't taken for a restart",
+			[]timedSample{{0, 40}, {40, 40}, {-1, 120}, {80, 40}, {120, 40}, {160, 40}, {200, 40}},
+			[]int{0, 40, 160, 160, 160, 160, 200},
+		},
+		{
 			"one stray timestamp doesn't move the frames after it",
 			[]timedSample{{5000, 40}, {5040, 40}, {0, 40}, {5080, 40}, {5120, 40}},
 			[]int{0, 40, 40, 80, 120},

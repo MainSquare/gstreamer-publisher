@@ -55,11 +55,13 @@ type rtpClock struct {
 	// Added to every capture time: where capture times that started over
 	// carry on from
 	offset uint32
-	// The sample before this one had a capture time that wasn't after the
-	// timestamp before it: that capture time, and the timestamp it got
-	wentBack     bool
-	backCaptured uint32
-	backStamp    uint32
+	// The capture time of the last sample that had one
+	hasCaptured bool
+	captured    uint32
+	// The sample before this one had a capture time before that of the
+	// sample before it: the timestamp it got
+	wentBack  bool
+	backStamp uint32
 }
 
 // rtpTimestampBase keeps the first timestamps away from zero, which the SDK
@@ -85,36 +87,45 @@ func rtpTicks(d time.Duration, clockRate uint32) uint32 {
 //   - No capture time: one duration on from the last sample, and at least one
 //     tick.
 //   - A capture time that isn't after the last timestamp (the sample before
-//     had none and went a duration on, or time went back): one tick on. If
-//     the next sample is after the last timestamp again, it is on capture
-//     time as if nothing had happened.
-//   - If the next sample goes on from the one that went back and is still not
-//     after the last timestamp, capture times have started over. The samples
-//     carry on from the timestamp the first of them got, with their own
-//     spacing. A tick apart, they would all be for the same instant until
-//     capture time had caught up. One sample alone doesn't settle it: a
+//     had none and went a duration on, or time went back): one tick on. The
+//     first sample that is after the last timestamp again is on capture time
+//     as if nothing had happened.
+//   - A capture time that went back, followed by one that goes on from it and
+//     still isn't after the last timestamp: capture times have started over.
+//     The samples carry on from the timestamp the first of them got, with
+//     their own spacing. A tick apart, they would all be for the same instant
+//     until capture time had caught up. One sample alone doesn't settle it: a
 //     single stray capture time would move every sample after it.
+//
+// Capture times are expected in the order the samples are sent. An encoder
+// that reorders frames (H.264 with B-frames) has them going back and forth,
+// which WebRTC receivers don't put back in order either.
 func (c *rtpClock) next(running time.Duration, valid bool, duration time.Duration, clockRate uint32) uint32 {
 	ts := uint32(rtpTimestampBase)
 	if c.started {
 		ts = c.last + max(rtpTicks(duration, clockRate), 1)
 	}
+	// Only the very next sample can settle it: one without a capture time
+	// in between, and the question is dropped
+	wentBack := c.wentBack
+	c.wentBack = false
 	if valid {
 		captured := rtpTimestampBase + rtpTicks(running, clockRate)
 		// Signed comparisons, so they also hold when the 32-bit timestamp
 		// wraps around
-		if c.wentBack && int32(captured-c.backCaptured) >= 0 && int32(c.last-(captured+c.offset)) >= 0 {
-			c.offset = c.backStamp - c.backCaptured
+		movedOn := !c.hasCaptured || int32(captured-c.captured) > 0
+		if wentBack && movedOn && int32(c.last-(captured+c.offset)) >= 0 {
+			c.offset = c.backStamp - c.captured
 		}
-		c.wentBack = false
 		if !c.started || int32(captured+c.offset-c.last) > 0 {
 			ts = captured + c.offset
 		} else {
 			ts = c.last + 1
-			c.wentBack = true
-			c.backCaptured = captured
+			c.wentBack = c.hasCaptured && int32(captured-c.captured) < 0
 			c.backStamp = ts
 		}
+		c.hasCaptured = true
+		c.captured = captured
 	}
 	if ts == 0 {
 		// Zero means "not given" to the SDK. One tick late, once every 13 hours

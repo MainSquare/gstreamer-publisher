@@ -50,7 +50,8 @@ alone, every dropped frame would leave the timestamps further behind the clock, 
 longer jitter buffer. A buffer without a timestamp is published one duration after the last, and one whose timestamp
 doesn't move forward one RTP tick after it; the next buffer with a later timestamp is on real time again. When the
 timestamps have started over (two buffers in a row that are behind, the second after the first), the buffers carry on
-from there with their own spacing.
+from there with their own spacing. Timestamps are expected in the order the buffers are sent: an encoder that reorders
+frames (H.264 with B-frames) isn't supported, as in WebRTC generally.
 
 This keeps the spacing within a track. It doesn't line audio up with video at the receiver.
 
